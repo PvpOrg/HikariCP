@@ -31,7 +31,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.zaxxer.hikari.pool.LeakTask;
-import com.zaxxer.hikari.pool.PoolBagEntry;
+import com.zaxxer.hikari.pool.PoolEntry;
 import com.zaxxer.hikari.util.ClockSource;
 import com.zaxxer.hikari.util.FastList;
 
@@ -49,7 +49,7 @@ public abstract class ConnectionProxy implements IHikariConnectionProxy
    protected Connection delegate;
 
    private final LeakTask leakTask;
-   private final PoolBagEntry poolEntry;
+   private final PoolEntry poolEntry;
    private final FastList<Statement> statements;
    
    private long lastAccess;
@@ -70,13 +70,13 @@ public abstract class ConnectionProxy implements IHikariConnectionProxy
       SQL_ERRORS.add("JZ0C1"); // Sybase disconnect error
    }
 
-   protected ConnectionProxy(final PoolBagEntry bagEntry, final LeakTask leakTask, final long now) {
-      this.poolEntry = bagEntry;
+   protected ConnectionProxy(final PoolEntry poolEntry, final LeakTask leakTask, final long now) {
+      this.poolEntry = poolEntry;
       this.leakTask = leakTask;
       this.lastAccess = now;
 
-      this.delegate = bagEntry.connection;
-      this.statements = bagEntry.openStatements;
+      this.delegate = poolEntry.connection;
+      this.statements = poolEntry.openStatements;
    }
 
    /** {@inheritDoc} */
@@ -95,7 +95,7 @@ public abstract class ConnectionProxy implements IHikariConnectionProxy
 
    /** {@inheritDoc} */
    @Override
-   public final PoolBagEntry getPoolBagEntry()
+   public final PoolEntry getPoolEntry()
    {
       return poolEntry;
    }

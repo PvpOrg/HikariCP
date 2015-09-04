@@ -30,8 +30,8 @@ import org.slf4j.LoggerFactory;
 
 import com.zaxxer.hikari.metrics.MetricsTrackerFactory;
 import com.zaxxer.hikari.pool.HikariPool;
+import com.zaxxer.hikari.pool.Mediator;
 import com.zaxxer.hikari.proxy.IHikariConnectionProxy;
-import com.zaxxer.hikari.util.DriverDataSource;
 
 /**
  * The HikariCP pooled DataSource.
@@ -70,7 +70,7 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
       configuration.copyState(this);
 
       LOGGER.info("{} - is starting.", configuration.getPoolName());
-      pool = fastPathPool = new HikariPool(this);
+      pool = fastPathPool = new HikariPool(this, new Mediator(this));
    }
 
    /** {@inheritDoc} */
@@ -93,7 +93,7 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
             if (result == null) {
                validate();
                LOGGER.info("{} - is starting.", getPoolName());
-               pool = result = new HikariPool(this);
+               pool = result = new HikariPool(this, new Mediator(this));
             }
          }
       }
@@ -290,10 +290,6 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
          }
          catch (InterruptedException e) {
         	 LOGGER.warn("Interrupted during closing", e);
-         }
-
-         if (pool.getDataSource() instanceof DriverDataSource) {
-            ((DriverDataSource) pool.getDataSource()).shutdown();
          }
       }
    }

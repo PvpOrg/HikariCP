@@ -15,6 +15,8 @@
  */
 package com.zaxxer.hikari.pool;
 
+import static com.zaxxer.hikari.pool.Mediators.ConnectionStateMediator;
+
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -36,7 +38,7 @@ import org.slf4j.LoggerFactory;
  *
  * @author Brett Wooldridge
  */
-public final class PoolBagEntry implements IConcurrentBagEntry
+public final class PoolEntry implements IConcurrentBagEntry
 {
    private static final Logger LOGGER;
    private static final SimpleDateFormat DATE_FORMAT;
@@ -57,28 +59,28 @@ public final class PoolBagEntry implements IConcurrentBagEntry
    String catalog;
    boolean isReadOnly;
    
-   private final PoolElf poolElf;
+   private final ConnectionStateMediator stateMediator;
    private final AtomicInteger state;
 
    private volatile ScheduledFuture<?> endOfLife;
 
    static
    {
-      LOGGER = LoggerFactory.getLogger(PoolBagEntry.class);
+      LOGGER = LoggerFactory.getLogger(PoolEntry.class);
       DATE_FORMAT = new SimpleDateFormat("MMM dd, HH:mm:ss.SSS");
    }
 
-   public PoolBagEntry(final Connection connection, final HikariPool pool)
+   public PoolEntry(final Connection connection, final HikariPool pool, final ConnectionStateMediator stateMediator)
    {
       this.connection = connection;
       this.parentPool = pool;
       this.creationTime = System.currentTimeMillis();
-      this.poolElf = pool.poolElf;
       this.state = new AtomicInteger(STATE_NOT_IN_USE);
       this.lastAccess = ClockSource.INSTANCE.currentTime();
       this.openStatements = new FastList<>(Statement.class, 16);
+      this.stateMediator = stateMediator;
 
-      poolElf.resetPoolEntry(this);
+      stateMediator.initPoolEntryState(this);
 
       final long maxLifetime = pool.config.getMaxLifetime();
       final long variance = maxLifetime > 60_000 ? ThreadLocalRandom.current().nextLong(10_000) : 0;
@@ -89,12 +91,12 @@ public final class PoolBagEntry implements IConcurrentBagEntry
             public void run()
             {
                // If we can reserve it, close it
-               if (pool.connectionBag.reserve(PoolBagEntry.this)) {
-                  pool.closeConnection(PoolBagEntry.this, "(connection reached maxLifetime)");
+               if (pool.connectionBag.reserve(PoolEntry.this)) {
+                  pool.closeConnection(PoolEntry.this, "(connection reached maxLifetime)");
                }
                else {
                   // else the connection is "in-use" and we mark it for eviction by pool.releaseConnection()
-                  PoolBagEntry.this.evict = true;
+                  PoolEntry.this.evict = true;
                }
             }
          }, lifetime, TimeUnit.MILLISECONDS);
@@ -118,7 +120,7 @@ public final class PoolBagEntry implements IConcurrentBagEntry
     */
    public void resetConnectionState() throws SQLException
    {
-      poolElf.resetConnectionState(this);
+      stateMediator.resetConnectionState(this);
    }
 
    /**

@@ -23,13 +23,16 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.pool.Mediators.JdbcMediator;
+import com.zaxxer.hikari.pool.Mediators.PoolMediator;
+import com.zaxxer.hikari.pool.Mediators.ConnectionStateMediator;
 import com.zaxxer.hikari.util.DefaultThreadFactory;
 import com.zaxxer.hikari.util.DriverDataSource;
 import com.zaxxer.hikari.util.PropertyElf;
 
-public final class PoolElf
+public final class Mediator implements Mediators, JdbcMediator, PoolMediator, ConnectionStateMediator
 {
-   private static final Logger LOGGER = LoggerFactory.getLogger(PoolElf.class);
+   private static final Logger LOGGER = LoggerFactory.getLogger(Mediator.class);
    private static final String[] RESET_STATES = {"readOnly", "autoCommit", "isolation", "catalog", "netTimeout"};
    private static final int UNINITIALIZED = -1;
    private static final int TRUE = 1;
@@ -37,10 +40,10 @@ public final class PoolElf
 
    private int networkTimeout;
    private int transactionIsolation;
-   private long validationTimeout;
    private int isNetworkTimeoutSupported;
    private int isQueryTimeoutSupported;
    private Executor netTimeoutExecutor;
+   private DataSource dataSource;
 
    private final HikariConfig config;
    private final String poolName;
@@ -49,11 +52,12 @@ public final class PoolElf
    private final boolean isAutoCommit;
    private final boolean isUseJdbc4Validation;
    private final boolean isIsolateInternalQueries;
+   private final AtomicReference<Throwable> lastConnectionFailure;
 
    private volatile boolean isValidChecked; 
    private volatile boolean isValidSupported;
 
-   public PoolElf(final HikariConfig configuration)
+   public Mediator(final HikariConfig configuration)
    {
       this.config = configuration;
 
@@ -61,7 +65,6 @@ public final class PoolElf
       this.catalog = config.getCatalog();
       this.isReadOnly = config.isReadOnly();
       this.isAutoCommit = config.isAutoCommit();
-      this.validationTimeout = config.getValidationTimeout();
       this.transactionIsolation = getTransactionIsolation(config.getTransactionIsolation());
 
       this.isValidSupported = true;
@@ -69,15 +72,19 @@ public final class PoolElf
       this.isNetworkTimeoutSupported = UNINITIALIZED;
       this.isUseJdbc4Validation = config.getConnectionTestQuery() == null;
       this.isIsolateInternalQueries = config.isIsolateInternalQueries();
+
       this.poolName = config.getPoolName();
+      this.lastConnectionFailure = new AtomicReference<>();
+
+      initializeDataSource();
    }
 
-   /**
-    * Close connection and eat any exception.
-    *
-    * @param connection the connection to close
-    * @param closureReason the reason the connection was closed (if known)
-    */
+   // ***********************************************************************
+   //                        JdbcMediator methods
+   // ***********************************************************************
+
+   /** {@inheritDoc} */
+   @Override
    public void quietlyCloseConnection(final Connection connection, final String closureReason)
    {
       try {
@@ -99,130 +106,44 @@ public final class PoolElf
       }
    }
 
-   /**
-    * Get the int value of a transaction isolation level by name.
-    *
-    * @param transactionIsolationName the name of the transaction isolation level
-    * @return the int value of the isolation level or -1
-    */
-   public static int getTransactionIsolation(final String transactionIsolationName)
+   /** {@inheritDoc} */
+   @Override
+   public Connection newConnection() throws Exception
    {
-      if (transactionIsolationName != null) {
-         try {
-            final String upperName = transactionIsolationName.toUpperCase();
-            if (upperName.startsWith("TRANSACTION_")) {
-               Field field = Connection.class.getField(upperName);
-               return field.getInt(null);
-            }
-            final int level = Integer.parseInt(transactionIsolationName);
-            switch (level) {
-               case Connection.TRANSACTION_READ_UNCOMMITTED:
-               case Connection.TRANSACTION_READ_COMMITTED:
-               case Connection.TRANSACTION_REPEATABLE_READ:
-               case Connection.TRANSACTION_SERIALIZABLE:
-               case Connection.TRANSACTION_NONE:
-                  return level;
-               default:
-                  throw new IllegalArgumentException();
-             }
-         }
-         catch (Exception e) {
-            throw new IllegalArgumentException("Invalid transaction isolation value: " + transactionIsolationName);
-         }
-      }
+      Connection connection = null;
+      try {
+         String username = config.getUsername();
+         String password = config.getPassword();
 
-      return -1;
+         connection = (username == null) ? dataSource.getConnection() : dataSource.getConnection(username, password);
+         setupConnection(connection, config.getConnectionTimeout());
+         lastConnectionFailure.set(null);
+         return connection;
+      }
+      catch (Exception e) {
+         quietlyCloseConnection(connection, "(exception during connection creation)");
+         throw e;
+      }
    }
 
-   /**
-    * Create/initialize the underlying DataSource.
-    *
-    * @return a DataSource instance
-    */
-   DataSource initializeDataSource()
-   {
-      final String jdbcUrl = config.getJdbcUrl();
-      final String username = config.getUsername();
-      final String password = config.getPassword();
-      final String dsClassName = config.getDataSourceClassName();
-      final String driverClassName = config.getDriverClassName();
-      final Properties dataSourceProperties = config.getDataSourceProperties();
-
-      DataSource dataSource = config.getDataSource();
-      if (dsClassName != null && dataSource == null) {
-         dataSource = createInstance(dsClassName, DataSource.class);
-         PropertyElf.setTargetFromProperties(dataSource, dataSourceProperties);
-      }
-      else if (jdbcUrl != null && dataSource == null) {
-         dataSource = new DriverDataSource(jdbcUrl, driverClassName, dataSourceProperties, username, password);
-      }
-
-      if (dataSource != null) {
-         setLoginTimeout(dataSource, config.getConnectionTimeout());
-         createNetworkTimeoutExecutor(dataSource, dsClassName, jdbcUrl);
-      }
-
-      return dataSource;
-   }
-
-   /**
-    * Setup a connection initial state.
-    *
-    * @param connection a Connection
-    * @param connectionTimeout the connection timeout
-    * @throws SQLException thrown from driver
-    */
-   void setupConnection(final Connection connection, final long connectionTimeout) throws SQLException
-   {
-      if (isUseJdbc4Validation && !isJdbc4ValidationSupported(connection)) {
-         throw new SQLException("Connection.isValid() is not supported, configure connection test query.");
-      }
-
-      networkTimeout = getAndSetNetworkTimeout(connection, connectionTimeout);
-
-      connection.setAutoCommit(isAutoCommit);
-      connection.setReadOnly(isReadOnly);
-
-      final int defaultLevel = connection.getTransactionIsolation();
-      transactionIsolation = (transactionIsolation < 0 || defaultLevel == Connection.TRANSACTION_NONE)
-                           ? defaultLevel
-                           : transactionIsolation;
-      if (transactionIsolation != defaultLevel) {
-         connection.setTransactionIsolation(transactionIsolation);
-      }
-
-      if (catalog != null) {
-         connection.setCatalog(catalog);
-      }
-
-      executeSql(connection, config.getConnectionInitSql(), isAutoCommit);
-
-      setNetworkTimeout(connection, networkTimeout);
-   }
-
-   /**
-    * Check whether the connection is alive or not.
-    *
-    * @param connection the connection to test
-    * @param lastConnectionFailure last connection failure
-    * @return true if the connection is alive, false if it is not alive or we timed out
-    */
-   boolean isConnectionAlive(final Connection connection, final AtomicReference<Throwable> lastConnectionFailure)
+   /** {@inheritDoc} */
+   @Override
+   public boolean isConnectionAlive(final Connection connection)
    {
       try {
-         int timeoutSec = (int) TimeUnit.MILLISECONDS.toSeconds(validationTimeout);
+         final long validationTimeout = config.getValidationTimeout();
    
          if (isUseJdbc4Validation) {
-            return connection.isValid(timeoutSec);
+            return connection.isValid((int) TimeUnit.MILLISECONDS.toSeconds(validationTimeout));
          }
    
          final int originalTimeout = getAndSetNetworkTimeout(connection, validationTimeout);
 
          try (Statement statement = connection.createStatement()) {
             if (isNetworkTimeoutSupported != TRUE) {
-               setQueryTimeout(statement, timeoutSec);
+               setQueryTimeout(statement, (int) TimeUnit.MILLISECONDS.toSeconds(validationTimeout));
             }
-        	
+         
             statement.execute(config.getConnectionTestQuery());
          }
    
@@ -241,7 +162,26 @@ public final class PoolElf
       }
    }
 
-   void resetConnectionState(final PoolBagEntry poolEntry) throws SQLException
+   /** {@inheritDoc} */
+   @Override
+   public DataSource getUnwrappedDataSource()
+   {
+      return dataSource;
+   }
+
+   /** {@inheritDoc} */
+   @Override
+   public Throwable getLastConnectionFailure()
+   {
+      return lastConnectionFailure.getAndSet(null);
+   }
+
+
+   // ***********************************************************************
+   //                     ConnectionStateMediator methods
+   // ***********************************************************************
+
+   public void resetConnectionState(final PoolEntry poolEntry) throws SQLException
    {
       int resetBits = 0;
 
@@ -281,7 +221,7 @@ public final class PoolElf
       }
    }
 
-   void resetPoolEntry(final PoolBagEntry poolEntry)
+   public void initPoolEntryState(final PoolEntry poolEntry)
    {
       poolEntry.setReadOnly(isReadOnly);
       poolEntry.setCatalog(catalog);
@@ -289,18 +229,18 @@ public final class PoolElf
       poolEntry.setNetworkTimeout(networkTimeout);
       poolEntry.setTransactionIsolation(transactionIsolation);
    }
+   
 
-   void setValidationTimeout(final long validationTimeout)
-   {
-      this.validationTimeout = validationTimeout;
-   }
+   // ***********************************************************************
+   //                       PoolMediator methods
+   // ***********************************************************************
 
    /**
     * Register MBeans for HikariConfig and HikariPool.
     *
     * @param pool a HikariPool instance
     */
-   void registerMBeans(final HikariPool pool)
+   public void registerMBeans(final HikariPool pool)
    {
       if (!config.isRegisterMbeans()) {
          return;
@@ -327,7 +267,7 @@ public final class PoolElf
    /**
     * Unregister MBeans for HikariConfig and HikariPool.
     */
-   void unregisterMBeans()
+   public void unregisterMBeans()
    {
       if (!config.isRegisterMbeans()) {
          return;
@@ -348,11 +288,147 @@ public final class PoolElf
       }
    }
 
-   void shutdownTimeoutExecutor()
+   public void shutdownTimeoutExecutor()
    {
       if (netTimeoutExecutor != null && netTimeoutExecutor instanceof ThreadPoolExecutor) {
          ((ThreadPoolExecutor) netTimeoutExecutor).shutdownNow();
       }
+   }
+
+   // ***********************************************************************
+   //                        Mediators accessors
+   // ***********************************************************************
+
+   /** {@inheritDoc} */
+   @Override
+   public JdbcMediator getJdbcMediator()
+   {
+      return this;
+   }
+
+
+   /** {@inheritDoc} */
+   @Override
+   public ConnectionStateMediator getConnectionStateMediator()
+   {
+      return this;
+   }
+
+
+   /** {@inheritDoc} */
+   @Override
+   public PoolMediator getPoolMediator()
+   {
+      return this;
+   }
+
+   // ***********************************************************************
+   //                       Misc. public methods
+   // ***********************************************************************
+
+   /**
+    * Get the int value of a transaction isolation level by name.
+    *
+    * @param transactionIsolationName the name of the transaction isolation level
+    * @return the int value of the isolation level or -1
+    */
+   public static int getTransactionIsolation(final String transactionIsolationName)
+   {
+      if (transactionIsolationName != null) {
+         try {
+            final String upperName = transactionIsolationName.toUpperCase();
+            if (upperName.startsWith("TRANSACTION_")) {
+               Field field = Connection.class.getField(upperName);
+               return field.getInt(null);
+            }
+            final int level = Integer.parseInt(transactionIsolationName);
+            switch (level) {
+               case Connection.TRANSACTION_READ_UNCOMMITTED:
+               case Connection.TRANSACTION_READ_COMMITTED:
+               case Connection.TRANSACTION_REPEATABLE_READ:
+               case Connection.TRANSACTION_SERIALIZABLE:
+               case Connection.TRANSACTION_NONE:
+                  return level;
+               default:
+                  throw new IllegalArgumentException();
+             }
+         }
+         catch (Exception e) {
+            throw new IllegalArgumentException("Invalid transaction isolation value: " + transactionIsolationName);
+         }
+      }
+
+      return -1;
+   }
+
+   // ***********************************************************************
+   //                          Private methods
+   // ***********************************************************************
+
+   /**
+    * Create/initialize the underlying DataSource.
+    *
+    * @return a DataSource instance
+    */
+   private void initializeDataSource()
+   {
+      final String jdbcUrl = config.getJdbcUrl();
+      final String username = config.getUsername();
+      final String password = config.getPassword();
+      final String dsClassName = config.getDataSourceClassName();
+      final String driverClassName = config.getDriverClassName();
+      final Properties dataSourceProperties = config.getDataSourceProperties();
+
+      DataSource dataSource = config.getDataSource();
+      if (dsClassName != null && dataSource == null) {
+         dataSource = createInstance(dsClassName, DataSource.class);
+         PropertyElf.setTargetFromProperties(dataSource, dataSourceProperties);
+      }
+      else if (jdbcUrl != null && dataSource == null) {
+         dataSource = new DriverDataSource(jdbcUrl, driverClassName, dataSourceProperties, username, password);
+      }
+
+      if (dataSource != null) {
+         setLoginTimeout(dataSource, config.getConnectionTimeout());
+         createNetworkTimeoutExecutor(dataSource, dsClassName, jdbcUrl);
+      }
+
+      this.dataSource = dataSource;
+   }
+
+   /**
+    * Setup a connection initial state.
+    *
+    * @param connection a Connection
+    * @param connectionTimeout the connection timeout
+    * @throws SQLException thrown from driver
+    */
+   private void setupConnection(final Connection connection, final long connectionTimeout) throws SQLException
+   {
+      if (isUseJdbc4Validation && !isJdbc4ValidationSupported(connection)) {
+         throw new SQLException("Connection.isValid() is not supported, configure connection test query.");
+      }
+
+      networkTimeout = getAndSetNetworkTimeout(connection, connectionTimeout);
+
+      connection.setAutoCommit(isAutoCommit);
+      connection.setReadOnly(isReadOnly);
+
+      final int defaultLevel = connection.getTransactionIsolation();
+      transactionIsolation = (transactionIsolation < 0 || defaultLevel == Connection.TRANSACTION_NONE)
+                           ? defaultLevel
+                           : transactionIsolation;
+      if (transactionIsolation != defaultLevel) {
+         connection.setTransactionIsolation(transactionIsolation);
+      }
+
+      if (catalog != null) {
+         connection.setCatalog(catalog);
+      }
+
+      executeSql(connection, config.getConnectionInitSql(), isAutoCommit);
+
+      setNetworkTimeout(connection, networkTimeout);
    }
 
    /**

@@ -29,7 +29,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.zaxxer.hikari.pool.HikariPool;
-import com.zaxxer.hikari.pool.PoolBagEntry;
+import com.zaxxer.hikari.pool.PoolEntry;
 import com.zaxxer.hikari.util.ConcurrentBag;
 import com.zaxxer.hikari.util.ConcurrentBag.IBagStateListener;
 
@@ -63,7 +63,7 @@ public class TestConcurrentBag
    @Test
    public void testConcurrentBag() throws InterruptedException
    {
-      ConcurrentBag<PoolBagEntry> bag = new ConcurrentBag<PoolBagEntry>(new IBagStateListener() {
+      ConcurrentBag<PoolEntry> bag = new ConcurrentBag<PoolEntry>(new IBagStateListener() {
          @Override
          public Future<Boolean> addBagItem()
          {
@@ -103,15 +103,15 @@ public class TestConcurrentBag
       Assert.assertEquals(0, bag.values(8).size());
 
       HikariPool pool = TestElf.getPool(ds);
-      PoolBagEntry reserved = new PoolBagEntry(null, TestElf.getPool(ds));
+      PoolEntry reserved = new PoolEntry(null, TestElf.getPool(ds));
       bag.add(reserved);
       bag.reserve(reserved);      // reserved
 
-      PoolBagEntry inuse = new PoolBagEntry(null, pool);
+      PoolEntry inuse = new PoolEntry(null, pool);
       bag.add(inuse);
       bag.borrow(2, TimeUnit.MILLISECONDS); // in use
       
-      PoolBagEntry notinuse = new PoolBagEntry(null, pool);
+      PoolEntry notinuse = new PoolEntry(null, pool);
       bag.add(notinuse); // not in use
 
       bag.dumpState();
@@ -135,7 +135,7 @@ public class TestConcurrentBag
 
       bag.close();
       try {
-         PoolBagEntry bagEntry = new PoolBagEntry(null, pool);
+         PoolEntry bagEntry = new PoolEntry(null, pool);
          bag.add(bagEntry);
          Assert.assertNotEquals(bagEntry, bag.borrow(100, TimeUnit.MILLISECONDS));
       }
