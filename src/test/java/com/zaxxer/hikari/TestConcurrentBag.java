@@ -28,7 +28,6 @@ import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.zaxxer.hikari.pool.HikariPool;
 import com.zaxxer.hikari.pool.Mediator;
 import com.zaxxer.hikari.pool.PoolEntry;
 import com.zaxxer.hikari.util.ConcurrentBag;
@@ -53,8 +52,8 @@ public class TestConcurrentBag
       config.setConnectionTestQuery("VALUES 1");
       config.setDataSourceClassName("com.zaxxer.hikari.mocks.StubDataSource");
 
-      mediator = new Mediator(config);
       ds = new HikariDataSource(config);      
+      mediator = new Mediator(TestElf.getPool(ds));
    }
 
    @AfterClass
@@ -64,7 +63,7 @@ public class TestConcurrentBag
    }
 
    @Test
-   public void testConcurrentBag() throws InterruptedException
+   public void testConcurrentBag() throws Exception
    {
       ConcurrentBag<PoolEntry> bag = new ConcurrentBag<PoolEntry>(new IBagStateListener() {
          @Override
@@ -105,16 +104,15 @@ public class TestConcurrentBag
       });
       Assert.assertEquals(0, bag.values(8).size());
 
-      HikariPool pool = TestElf.getPool(ds);
-      PoolEntry reserved = new PoolEntry(null, TestElf.getPool(ds), mediator.getConnectionStateMediator());
+      PoolEntry reserved = mediator.newPoolEntry();
       bag.add(reserved);
       bag.reserve(reserved);      // reserved
 
-      PoolEntry inuse = new PoolEntry(null, pool, mediator.getConnectionStateMediator());
+      PoolEntry inuse = mediator.newPoolEntry();
       bag.add(inuse);
       bag.borrow(2, TimeUnit.MILLISECONDS); // in use
       
-      PoolEntry notinuse = new PoolEntry(null, pool, mediator.getConnectionStateMediator());
+      PoolEntry notinuse = mediator.newPoolEntry();
       bag.add(notinuse); // not in use
 
       bag.dumpState();
@@ -138,7 +136,7 @@ public class TestConcurrentBag
 
       bag.close();
       try {
-         PoolEntry bagEntry = new PoolEntry(null, pool, mediator.getConnectionStateMediator());
+         PoolEntry bagEntry = mediator.newPoolEntry();
          bag.add(bagEntry);
          Assert.assertNotEquals(bagEntry, bag.borrow(100, TimeUnit.MILLISECONDS));
       }

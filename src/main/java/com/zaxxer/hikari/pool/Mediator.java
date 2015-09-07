@@ -23,9 +23,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.pool.Mediators.ConnectionStateMediator;
 import com.zaxxer.hikari.pool.Mediators.JdbcMediator;
 import com.zaxxer.hikari.pool.Mediators.PoolMediator;
-import com.zaxxer.hikari.pool.Mediators.ConnectionStateMediator;
+import com.zaxxer.hikari.proxy.ConnectionState;
 import com.zaxxer.hikari.util.DefaultThreadFactory;
 import com.zaxxer.hikari.util.DriverDataSource;
 import com.zaxxer.hikari.util.PropertyElf;
@@ -45,6 +46,7 @@ public final class Mediator implements Mediators, JdbcMediator, PoolMediator, Co
    private Executor netTimeoutExecutor;
    private DataSource dataSource;
 
+   private final HikariPool hikariPool;
    private final HikariConfig config;
    private final String poolName;
    private final String catalog;
@@ -57,9 +59,10 @@ public final class Mediator implements Mediators, JdbcMediator, PoolMediator, Co
    private volatile boolean isValidChecked; 
    private volatile boolean isValidSupported;
 
-   public Mediator(final HikariConfig configuration)
+   public Mediator(final HikariPool pool)
    {
-      this.config = configuration;
+      this.hikariPool = pool;
+      this.config = pool.config;
 
       this.networkTimeout = -1;
       this.catalog = config.getCatalog();
@@ -103,26 +106,6 @@ public final class Mediator implements Mediators, JdbcMediator, PoolMediator, Co
       }
       catch (Throwable e) {
          LOGGER.debug("{} - Closing connection {} failed", poolName, connection, e);
-      }
-   }
-
-   /** {@inheritDoc} */
-   @Override
-   public Connection newConnection() throws Exception
-   {
-      Connection connection = null;
-      try {
-         String username = config.getUsername();
-         String password = config.getPassword();
-
-         connection = (username == null) ? dataSource.getConnection() : dataSource.getConnection(username, password);
-         setupConnection(connection, config.getConnectionTimeout());
-         lastConnectionFailure.set(null);
-         return connection;
-      }
-      catch (Exception e) {
-         quietlyCloseConnection(connection, "(exception during connection creation)");
-         throw e;
       }
    }
 
@@ -181,53 +164,57 @@ public final class Mediator implements Mediators, JdbcMediator, PoolMediator, Co
    //                     ConnectionStateMediator methods
    // ***********************************************************************
 
-   public void resetConnectionState(final PoolEntry poolEntry) throws SQLException
+   /** {@inheritDoc} */
+   @Override
+   public PoolEntry newPoolEntry() throws Exception
    {
-      int resetBits = 0;
-
-      if (poolEntry.isReadOnly != isReadOnly) {
-         poolEntry.connection.setReadOnly(isReadOnly);
-         poolEntry.setReadOnly(isReadOnly);
-         resetBits |= 0b00001;
-      }
-
-      if (poolEntry.isAutoCommit != isAutoCommit) {
-         poolEntry.connection.setAutoCommit(isAutoCommit);
-         poolEntry.setAutoCommit(isAutoCommit);
-         resetBits |= 0b00010;
-      }
-
-      if (poolEntry.transactionIsolation != transactionIsolation) {
-         poolEntry.connection.setTransactionIsolation(transactionIsolation);
-         poolEntry.setTransactionIsolation(transactionIsolation);
-         resetBits |= 0b00100;
-      }
-
-      final String currentCatalog = poolEntry.catalog;
-      if ((currentCatalog != null && !currentCatalog.equals(catalog)) || (currentCatalog == null && catalog != null)) {
-         poolEntry.connection.setCatalog(catalog);
-         poolEntry.setCatalog(catalog);
-         resetBits |= 0b01000;
-      }
-
-      if (poolEntry.networkTimeout != networkTimeout) {
-         setNetworkTimeout(poolEntry.connection, networkTimeout);
-         poolEntry.setNetworkTimeout(networkTimeout);
-         resetBits |= 0b10000;
-      }
-      
-      if (LOGGER.isDebugEnabled()) {
-         LOGGER.debug("{} - Reset ({}) on connection {}", poolName, resetBits != 0 ? stringFromResetBits(resetBits) : "nothing", poolEntry.connection);
-      }
-   }
-
-   public void initPoolEntryState(final PoolEntry poolEntry)
-   {
+      final PoolEntry poolEntry = new PoolEntry(newConnection(), hikariPool, this);
       poolEntry.setReadOnly(isReadOnly);
       poolEntry.setCatalog(catalog);
       poolEntry.setAutoCommit(isAutoCommit);
       poolEntry.setNetworkTimeout(networkTimeout);
       poolEntry.setTransactionIsolation(transactionIsolation);
+      return poolEntry;
+   }
+
+   public void resetConnectionState(final Connection connection, final ConnectionState liveState) throws SQLException
+   {
+      int resetBits = 0;
+
+      if (liveState.isReadOnly() != isReadOnly) {
+         connection.setReadOnly(isReadOnly);
+         liveState.setReadOnly(isReadOnly);
+         resetBits |= 0b00001;
+      }
+
+      if (liveState.isAutoCommit() != isAutoCommit) {
+         connection.setAutoCommit(isAutoCommit);
+         liveState.setAutoCommit(isAutoCommit);
+         resetBits |= 0b00010;
+      }
+
+      if (liveState.getTransactionIsolation() != transactionIsolation) {
+         connection.setTransactionIsolation(transactionIsolation);
+         liveState.setTransactionIsolation(transactionIsolation);
+         resetBits |= 0b00100;
+      }
+
+      final String currentCatalog = liveState.getCatalog();
+      if ((currentCatalog != null && !currentCatalog.equals(catalog)) || (currentCatalog == null && catalog != null)) {
+         connection.setCatalog(catalog);
+         liveState.setCatalog(catalog);
+         resetBits |= 0b01000;
+      }
+
+      if (liveState.getNetworkTimeout() != networkTimeout) {
+         setNetworkTimeout(connection, networkTimeout);
+         liveState.setNetworkTimeout(networkTimeout);
+         resetBits |= 0b10000;
+      }
+      
+      if (LOGGER.isDebugEnabled()) {
+         LOGGER.debug("{} - Reset ({}) on connection {}", poolName, resetBits != 0 ? stringFromResetBits(resetBits) : "nothing", connection);
+      }
    }
    
 
@@ -240,7 +227,7 @@ public final class Mediator implements Mediators, JdbcMediator, PoolMediator, Co
     *
     * @param pool a HikariPool instance
     */
-   public void registerMBeans(final HikariPool pool)
+   public void registerMBeans()
    {
       if (!config.isRegisterMbeans()) {
          return;
@@ -253,7 +240,7 @@ public final class Mediator implements Mediators, JdbcMediator, PoolMediator, Co
          final ObjectName beanPoolName = new ObjectName("com.zaxxer.hikari:type=Pool (" + poolName + ")");
          if (!mBeanServer.isRegistered(beanConfigName)) {
             mBeanServer.registerMBean(config, beanConfigName);
-            mBeanServer.registerMBean(pool, beanPoolName);
+            mBeanServer.registerMBean(hikariPool, beanPoolName);
          }
          else {
             LOGGER.error("{} - You cannot use the same pool name for separate pool instances.", poolName);
@@ -394,6 +381,24 @@ public final class Mediator implements Mediators, JdbcMediator, PoolMediator, Co
       }
 
       this.dataSource = dataSource;
+   }
+
+   private Connection newConnection() throws Exception
+   {
+      Connection connection = null;
+      try {
+         String username = config.getUsername();
+         String password = config.getPassword();
+
+         connection = (username == null) ? dataSource.getConnection() : dataSource.getConnection(username, password);
+         setupConnection(connection, config.getConnectionTimeout());
+         lastConnectionFailure.set(null);
+         return connection;
+      }
+      catch (Exception e) {
+         quietlyCloseConnection(connection, "(exception during connection creation)");
+         throw e;
+      }
    }
 
    /**

@@ -21,6 +21,8 @@ import java.sql.SQLException;
 
 import javax.sql.DataSource;
 
+import com.zaxxer.hikari.proxy.ConnectionState;
+
 /**
  * Mediator pattern interfaces.
  *
@@ -36,8 +38,6 @@ public interface Mediators
 
    interface JdbcMediator
    {
-      Connection newConnection() throws Exception;
-
       /**
        * Check whether the connection is alive or not.
        *
@@ -54,7 +54,7 @@ public interface Mediators
        * @param connection the connection to close
        * @param closureReason the reason the connection was closed (if known)
        */
-      void quietlyCloseConnection(final Connection connection, final String closureReason);
+      void quietlyCloseConnection(Connection connection, String closureReason);
 
       /**
        * Get the raw DataSource that the pool is managing.
@@ -66,7 +66,7 @@ public interface Mediators
 
    interface PoolMediator
    {
-      void registerMBeans(HikariPool pool);
+      void registerMBeans();
 
       void unregisterMBeans();
 
@@ -75,8 +75,8 @@ public interface Mediators
 
    interface ConnectionStateMediator
    {
-      void initPoolEntryState(PoolEntry poolEntry);
-
-      void resetConnectionState(final PoolEntry poolEntry) throws SQLException;
+      PoolEntry newPoolEntry() throws Exception;
+      
+      void resetConnectionState(Connection connection, ConnectionState liveState) throws SQLException;
    }
 }

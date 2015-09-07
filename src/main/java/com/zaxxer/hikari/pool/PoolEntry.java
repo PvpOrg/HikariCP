@@ -15,36 +15,34 @@
  */
 package com.zaxxer.hikari.pool;
 
-import static com.zaxxer.hikari.pool.Mediators.ConnectionStateMediator;
-
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.zaxxer.hikari.pool.Mediators.ConnectionStateMediator;
+import com.zaxxer.hikari.proxy.ConnectionState;
 import com.zaxxer.hikari.util.ClockSource;
 import com.zaxxer.hikari.util.ConcurrentBag.IConcurrentBagEntry;
 import com.zaxxer.hikari.util.FastList;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Entry used in the ConcurrentBag to track Connection instances.
  *
  * @author Brett Wooldridge
  */
-public final class PoolEntry implements IConcurrentBagEntry
+public final class PoolEntry implements IConcurrentBagEntry, ConnectionState
 {
    private static final Logger LOGGER;
    private static final SimpleDateFormat DATE_FORMAT;
 
    public final FastList<Statement> openStatements;
-   public final HikariPool parentPool;
    public final long creationTime;
 
    public Connection connection;
@@ -59,6 +57,7 @@ public final class PoolEntry implements IConcurrentBagEntry
    String catalog;
    boolean isReadOnly;
    
+   private final HikariPool hikariPool;
    private final ConnectionStateMediator stateMediator;
    private final AtomicInteger state;
 
@@ -70,37 +69,15 @@ public final class PoolEntry implements IConcurrentBagEntry
       DATE_FORMAT = new SimpleDateFormat("MMM dd, HH:mm:ss.SSS");
    }
 
-   public PoolEntry(final Connection connection, final HikariPool pool, final ConnectionStateMediator stateMediator)
+   PoolEntry(final Connection connection, final HikariPool pool, final ConnectionStateMediator stateMediator)
    {
       this.connection = connection;
-      this.parentPool = pool;
+      this.hikariPool = pool;
       this.creationTime = System.currentTimeMillis();
       this.state = new AtomicInteger(STATE_NOT_IN_USE);
       this.lastAccess = ClockSource.INSTANCE.currentTime();
       this.openStatements = new FastList<>(Statement.class, 16);
       this.stateMediator = stateMediator;
-
-      stateMediator.initPoolEntryState(this);
-
-      final long maxLifetime = pool.config.getMaxLifetime();
-      final long variance = maxLifetime > 60_000 ? ThreadLocalRandom.current().nextLong(10_000) : 0;
-      final long lifetime = maxLifetime - variance;
-      if (lifetime > 0) {
-         endOfLife = pool.houseKeepingExecutorService.schedule(new Runnable() {
-            @Override
-            public void run()
-            {
-               // If we can reserve it, close it
-               if (pool.connectionBag.reserve(PoolEntry.this)) {
-                  pool.closeConnection(PoolEntry.this, "(connection reached maxLifetime)");
-               }
-               else {
-                  // else the connection is "in-use" and we mark it for eviction by pool.releaseConnection()
-                  PoolEntry.this.evict = true;
-               }
-            }
-         }, lifetime, TimeUnit.MILLISECONDS);
-      }
    }
 
    /**
@@ -108,60 +85,129 @@ public final class PoolEntry implements IConcurrentBagEntry
     *
     * @param lastAccess last access time-stamp
     */
-   public void releaseConnection(final long lastAccess)
+   @Override
+   public void returnPoolEntry(final long lastAccess)
    {
       this.lastAccess = lastAccess;
-      parentPool.releaseConnection(this);
+      hikariPool.releaseConnection(this);
    }
 
    /**
-    * Reset the connection to its original state.
-    * @throws SQLException thrown if there is an error resetting the connection state
+    * @param endOfLife
     */
+   public void setFutureEol(ScheduledFuture<?> endOfLife)
+   {
+      this.endOfLife = endOfLife;
+   }
+
+   // ***********************************************************************
+   //                      ConnectionState methods
+   // ***********************************************************************
+
+   @Override
    public void resetConnectionState() throws SQLException
    {
-      stateMediator.resetConnectionState(this);
+      stateMediator.resetConnectionState(connection, this);
    }
 
-   /**
-    * @param networkTimeout the networkTimeout to set
-    */
+   public String getPoolName()
+   {
+      return hikariPool.config.getPoolName();
+   }
+
+   @Override
    public void setNetworkTimeout(int networkTimeout)
    {
       this.networkTimeout = networkTimeout;
    }
 
-   /**
-    * @param transactionIsolation the transactionIsolation to set
-    */
+   @Override
    public void setTransactionIsolation(int transactionIsolation)
    {
       this.transactionIsolation = transactionIsolation;
    }
 
-   /**
-    * @param catalog the catalog to set
-    */
+   @Override
    public void setCatalog(String catalog)
    {
       this.catalog = catalog;
    }
 
-   /**
-    * @param isAutoCommit the isAutoCommit to set
-    */
+   @Override
+   public boolean isAutoCommit()
+   {
+      return isAutoCommit;
+   }
+
+   @Override
    public void setAutoCommit(boolean isAutoCommit)
    {
       this.isAutoCommit = isAutoCommit;
    }
 
-   /**
-    * @param isReadOnly the isReadOnly to set
-    */
+   @Override
+   public int getNetworkTimeout()
+   {
+      return networkTimeout;
+   }
+
+   @Override
+   public int getTransactionIsolation()
+   {
+      return transactionIsolation;
+   }
+
+   @Override
+   public String getCatalog()
+   {
+      return catalog;
+   }
+
+   @Override
+   public boolean isReadOnly()
+   {
+      return isReadOnly;
+   }
+
+   @Override
    public void setReadOnly(boolean isReadOnly)
    {
       this.isReadOnly = isReadOnly;
    }
+
+   @Override
+   public Connection getConnection()
+   {
+      return connection;
+   }
+
+   @Override
+   public long getLastAccess()
+   {
+      return lastAccess;
+   }
+
+   @Override
+   public void setLastAccess(long timestamp)
+   {
+      this.lastAccess = timestamp;
+   }
+
+   @Override
+   public boolean isEvicted()
+   {
+      return evict;
+   }
+
+   @Override
+   public void evict()
+   {
+      this.evict = true;
+   }
+
+   // ***********************************************************************
+   //                      IConcurrentBagEntry methods
+   // ***********************************************************************
 
    /** {@inheritDoc} */
    @Override
@@ -190,12 +236,11 @@ public final class PoolEntry implements IConcurrentBagEntry
    void close()
    {
       if (endOfLife != null && !endOfLife.isDone() && !endOfLife.cancel(false)) {
-         LOGGER.warn("{} - maxLifeTime expiration task cancellation unexpectedly returned false for connection {}", parentPool.config.getPoolName(), connection);
+         LOGGER.warn("{} - maxLifeTime expiration task cancellation unexpectedly returned false for connection {}", getPoolName(), connection);
       }
 
       endOfLife = null;
       connection = null;
-      parentPool.houseKeepingExecutorService.purge();
    }
 
    private static synchronized String formatDateTime(final long timestamp)

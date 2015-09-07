@@ -31,6 +31,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -50,6 +51,7 @@ import com.zaxxer.hikari.metrics.MetricsTracker;
 import com.zaxxer.hikari.metrics.MetricsTracker.MetricsContext;
 import com.zaxxer.hikari.metrics.MetricsTrackerFactory;
 import com.zaxxer.hikari.metrics.PoolStats;
+import com.zaxxer.hikari.pool.Mediators.ConnectionStateMediator;
 import com.zaxxer.hikari.pool.Mediators.JdbcMediator;
 import com.zaxxer.hikari.pool.Mediators.PoolMediator;
 import com.zaxxer.hikari.proxy.IHikariConnectionProxy;
@@ -83,10 +85,10 @@ public class HikariPool implements HikariPoolMXBean, IBagStateListener
    final ConcurrentBag<PoolEntry> connectionBag;
    final ScheduledThreadPoolExecutor houseKeepingExecutorService;
 
-   private final Mediators mediators;
    private final JdbcMediator jdbcMediator;
    private final PoolMediator poolMediator;
    private final AtomicInteger totalConnections;
+   private final ConnectionStateMediator entryMediator;
    private final ThreadPoolExecutor addConnectionExecutor;
    private final ThreadPoolExecutor closeConnectionExecutor;
 
@@ -100,19 +102,19 @@ public class HikariPool implements HikariPoolMXBean, IBagStateListener
    private volatile MetricsTracker metricsTracker;
    private boolean isRecordMetrics;
 
-
    /**
     * Construct a HikariPool with the specified configuration.
     *
     * @param config a HikariConfig instance
     */
-   public HikariPool(final HikariConfig config, final Mediators mediators)
+   public HikariPool(final HikariConfig config)
     {
       this.config = config;
 
-      this.mediators = mediators;
+      final Mediator mediators = new Mediator(this);
       this.jdbcMediator = mediators.getJdbcMediator();
       this.poolMediator = mediators.getPoolMediator();
+      this.entryMediator = mediators.getConnectionStateMediator();
 
       this.poolName = config.getPoolName();
       this.connectionBag = new ConcurrentBag<>(this);
@@ -146,7 +148,7 @@ public class HikariPool implements HikariPoolMXBean, IBagStateListener
 
       setHealthCheckRegistry(config.getHealthCheckRegistry());
 
-      poolMediator.registerMBeans(this);
+      poolMediator.registerMBeans();
 
       PropertyElf.flushCaches();
 
@@ -191,9 +193,10 @@ public class HikariPool implements HikariPoolMXBean, IBagStateListener
                timeout = hardTimeout - clockSource.elapsedMillis(startTime, now);
             }
             else {
+               poolEntry.setLastAccess(now);
                metricsContext.setConnectionLastOpen(poolEntry, now);
                metricsContext.stop();
-               return ProxyFactory.getProxyConnection(poolEntry, leakTask.start(poolEntry), now);
+               return ProxyFactory.getProxyConnection(poolEntry, poolEntry.openStatements, leakTask.start(poolEntry));
             }
          }
          while (timeout > 0L);
@@ -287,7 +290,7 @@ public class HikariPool implements HikariPoolMXBean, IBagStateListener
     */
    public final void evictConnection(IHikariConnectionProxy proxyConnection)
    {
-      closeConnection(proxyConnection.getPoolEntry(), "(connection evicted by user)");
+      softEvictConnection((PoolEntry) proxyConnection.getConnectionState(), "(connection evicted by user)", true /* owner */);
    }
 
    /**
@@ -414,10 +417,7 @@ public class HikariPool implements HikariPoolMXBean, IBagStateListener
    public void softEvictConnections()
    {
       for (PoolEntry poolEntry : connectionBag.values()) {
-         poolEntry.evict = true;
-         if (connectionBag.reserve(poolEntry)) {
-            closeConnection(poolEntry, "(connection evicted by user)");
-         }
+         softEvictConnection(poolEntry, "(connection evicted by user)", false /* not owner */);
       }
    }
 
@@ -489,11 +489,22 @@ public class HikariPool implements HikariPoolMXBean, IBagStateListener
       }
 
       try {
-         final Connection connection = jdbcMediator.newConnection();
+         final PoolEntry poolEntry = entryMediator.newPoolEntry();
+         connectionBag.add(poolEntry);
 
-         connectionBag.add(new PoolEntry(connection, this, mediators.getConnectionStateMediator()));
-         LOGGER.debug("{} - Added connection {}", poolName, connection);
-
+         final long maxLifetime = config.getMaxLifetime();
+         if (maxLifetime > 0) {
+            final long variance = maxLifetime > 60_000 ? ThreadLocalRandom.current().nextLong(10_000) : 0;
+            final long lifetime = maxLifetime - variance;
+            poolEntry.setFutureEol(houseKeepingExecutorService.schedule(new Runnable() {
+               @Override
+               public void run() {
+                  softEvictConnection(poolEntry, "(connection reached maxLifetime)", false /* not owner */);
+               }
+            }, lifetime, TimeUnit.MILLISECONDS));
+         }
+         
+         LOGGER.debug("{} - Added connection {}", poolName, poolEntry.connection);
          return true;
       }
       catch (Exception e) {
@@ -579,6 +590,14 @@ public class HikariPool implements HikariPoolMXBean, IBagStateListener
       }
 
       fillPool();
+   }
+
+   private void softEvictConnection(final PoolEntry poolEntry, final String reason, final boolean owner)
+   {
+      poolEntry.evict();
+      if (connectionBag.reserve(poolEntry) || owner) {
+         closeConnection(poolEntry, reason);
+      }
    }
 
    private PoolStats getPoolStats()

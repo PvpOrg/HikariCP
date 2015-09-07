@@ -292,7 +292,7 @@ public class ShutdownTest
                   Assert.fail(e.getMessage());
                }
                finally {
-                  new Mediator(config).quietlyCloseConnection(connection, "(because this is a test)");
+                  new Mediator(TestElf.getPool(ds)).quietlyCloseConnection(connection, "(because this is a test)");
                   ds.close();
                }
             };

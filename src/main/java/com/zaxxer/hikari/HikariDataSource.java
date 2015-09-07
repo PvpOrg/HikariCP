@@ -30,7 +30,6 @@ import org.slf4j.LoggerFactory;
 
 import com.zaxxer.hikari.metrics.MetricsTrackerFactory;
 import com.zaxxer.hikari.pool.HikariPool;
-import com.zaxxer.hikari.pool.Mediator;
 import com.zaxxer.hikari.proxy.IHikariConnectionProxy;
 
 /**
@@ -70,7 +69,7 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
       configuration.copyState(this);
 
       LOGGER.info("{} - is starting.", configuration.getPoolName());
-      pool = fastPathPool = new HikariPool(this, new Mediator(this));
+      pool = fastPathPool = new HikariPool(this);
    }
 
    /** {@inheritDoc} */
@@ -93,7 +92,7 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
             if (result == null) {
                validate();
                LOGGER.info("{} - is starting.", getPoolName());
-               pool = result = new HikariPool(this, new Mediator(this));
+               pool = result = new HikariPool(this);
             }
          }
       }

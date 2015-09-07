@@ -23,7 +23,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 
 import com.zaxxer.hikari.pool.LeakTask;
-import com.zaxxer.hikari.pool.PoolEntry;
+import com.zaxxer.hikari.util.FastList;
 
 /**
  * A factory class that produces proxies around instances of the standard
@@ -41,12 +41,12 @@ public final class ProxyFactory
    /**
     * Create a proxy for the specified {@link Connection} instance.
     *
-    * @param bagEntry the PoolBagEntry entry for this proxy
-    * @param leakTask a leak detetection task
+    * @param connectionState the PoolBagEntry entry for this proxy
+    * @param openStatements a leak detetection task
     * @param now current timestamp in milliseconds
     * @return a proxy that wraps the specified {@link Connection}
     */
-   public static IHikariConnectionProxy getProxyConnection(final PoolEntry bagEntry, final LeakTask leakTask, final long now)
+   public static IHikariConnectionProxy getProxyConnection(final ConnectionState connectionState, final FastList<Statement> openStatements, final LeakTask leakTask)
    {
       // Body is replaced (injected) by JavassistProxyFactory
       throw new IllegalStateException("You need to run the CLI build and you need target/classes in your classpath to run.");
