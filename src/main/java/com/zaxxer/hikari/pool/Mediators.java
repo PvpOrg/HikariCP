@@ -32,7 +32,7 @@ public interface Mediators
 {
    JdbcMediator getJdbcMediator();
 
-   ConnectionStateMediator getConnectionStateMediator();
+   PoolEntryMediator getConnectionStateMediator();
 
    PoolMediator getPoolMediator();
 
@@ -73,10 +73,10 @@ public interface Mediators
       void shutdownTimeoutExecutor();
    }
 
-   interface ConnectionStateMediator
+   interface PoolEntryMediator
    {
       PoolEntry newPoolEntry() throws Exception;
       
-      void resetConnectionState(Connection connection, ConnectionState liveState) throws SQLException;
+      void resetConnectionState(Connection connection, ConnectionState liveState, int dirtyBits) throws SQLException;
    }
 }

@@ -20,6 +20,8 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 
+import com.zaxxer.hikari.pool.PoolEntry;
+
 /**
  * The interface used by the Connection proxy and through which all interaction
  * by other classes flow.
@@ -33,7 +35,7 @@ public interface IHikariConnectionProxy extends Connection
     *
     * @return the PoolBagEntry
     */
-   ConnectionState getConnectionState();
+   PoolEntry getPoolEntry();
 
    /**
     * Check if the provided SQLException contains a SQLSTATE that indicates

@@ -23,7 +23,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.pool.Mediators.ConnectionStateMediator;
+import com.zaxxer.hikari.pool.Mediators.PoolEntryMediator;
 import com.zaxxer.hikari.pool.Mediators.JdbcMediator;
 import com.zaxxer.hikari.pool.Mediators.PoolMediator;
 import com.zaxxer.hikari.proxy.ConnectionState;
@@ -31,7 +31,7 @@ import com.zaxxer.hikari.util.DefaultThreadFactory;
 import com.zaxxer.hikari.util.DriverDataSource;
 import com.zaxxer.hikari.util.PropertyElf;
 
-public final class Mediator implements Mediators, JdbcMediator, PoolMediator, ConnectionStateMediator
+public final class Mediator implements Mediators, JdbcMediator, PoolMediator, PoolEntryMediator
 {
    private static final Logger LOGGER = LoggerFactory.getLogger(Mediator.class);
    private static final String[] RESET_STATES = {"readOnly", "autoCommit", "isolation", "catalog", "netTimeout"};
@@ -168,47 +168,38 @@ public final class Mediator implements Mediators, JdbcMediator, PoolMediator, Co
    @Override
    public PoolEntry newPoolEntry() throws Exception
    {
-      final PoolEntry poolEntry = new PoolEntry(newConnection(), hikariPool, this);
-      poolEntry.setReadOnly(isReadOnly);
-      poolEntry.setCatalog(catalog);
-      poolEntry.setAutoCommit(isAutoCommit);
-      poolEntry.setNetworkTimeout(networkTimeout);
-      poolEntry.setTransactionIsolation(transactionIsolation);
-      return poolEntry;
+      return new PoolEntry(newConnection(), hikariPool, this);
    }
 
-   public void resetConnectionState(final Connection connection, final ConnectionState liveState) throws SQLException
+   public void resetConnectionState(final Connection connection, final ConnectionState liveState, final int dirtyBits) throws SQLException
    {
       int resetBits = 0;
 
-      if (liveState.isReadOnly() != isReadOnly) {
+      if ((dirtyBits & 0b00001) != 0 && liveState.getReadOnlyState() != isReadOnly) {
          connection.setReadOnly(isReadOnly);
-         liveState.setReadOnly(isReadOnly);
          resetBits |= 0b00001;
       }
 
-      if (liveState.isAutoCommit() != isAutoCommit) {
+      if ((dirtyBits & 0b00010) != 0 && liveState.getAutoCommitState() != isAutoCommit) {
          connection.setAutoCommit(isAutoCommit);
-         liveState.setAutoCommit(isAutoCommit);
          resetBits |= 0b00010;
       }
 
-      if (liveState.getTransactionIsolation() != transactionIsolation) {
+      if ((dirtyBits & 0b00100) != 0 && liveState.getTransactionIsolationState() != transactionIsolation) {
          connection.setTransactionIsolation(transactionIsolation);
-         liveState.setTransactionIsolation(transactionIsolation);
          resetBits |= 0b00100;
       }
 
-      final String currentCatalog = liveState.getCatalog();
-      if ((currentCatalog != null && !currentCatalog.equals(catalog)) || (currentCatalog == null && catalog != null)) {
-         connection.setCatalog(catalog);
-         liveState.setCatalog(catalog);
-         resetBits |= 0b01000;
+      if ((dirtyBits & 0b01000) != 0) {
+         final String currentCatalog = liveState.getCatalogState();
+         if ((currentCatalog != null && !currentCatalog.equals(catalog)) || (currentCatalog == null && catalog != null)) {
+            connection.setCatalog(catalog);
+            resetBits |= 0b01000;
+         }
       }
 
-      if (liveState.getNetworkTimeout() != networkTimeout) {
+      if ((dirtyBits & 0b10000) != 0 && liveState.getNetworkTimeoutState() != networkTimeout) {
          setNetworkTimeout(connection, networkTimeout);
-         liveState.setNetworkTimeout(networkTimeout);
          resetBits |= 0b10000;
       }
       
@@ -296,7 +287,7 @@ public final class Mediator implements Mediators, JdbcMediator, PoolMediator, Co
 
    /** {@inheritDoc} */
    @Override
-   public ConnectionStateMediator getConnectionStateMediator()
+   public PoolEntryMediator getConnectionStateMediator()
    {
       return this;
    }

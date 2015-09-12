@@ -16,67 +16,21 @@
 
 package com.zaxxer.hikari.proxy;
 
-import java.sql.Connection;
-import java.sql.SQLException;
-
 /**
  * @author brettw
  *
  */
 public interface ConnectionState
 {
-   /**
-    * Reset the connection to its original state.
-    * @throws SQLException thrown if there is an error resetting the connection state
-    */
-   void resetConnectionState() throws SQLException;
+   int getNetworkTimeoutState();
 
-   void returnPoolEntry(long lastAccess);
+   int getTransactionIsolationState();
 
-   int getNetworkTimeout();
+   String getCatalogState();
 
-   /**
-    * @param networkTimeout the networkTimeout to set
-    */
-   void setNetworkTimeout(int networkTimeout);
+   boolean getAutoCommitState();
 
-   int getTransactionIsolation();
-
-   /**
-    * @param transactionIsolation the transactionIsolation to set
-    */
-   void setTransactionIsolation(int transactionIsolation);
-
-   String getCatalog();
-
-   /**
-    * @param catalog the catalog to set
-    */
-   void setCatalog(String catalog);
-
-   boolean isAutoCommit();
-
-   /**
-    * @param isAutoCommit the isAutoCommit to set
-    */
-   void setAutoCommit(boolean isAutoCommit);
-
-   boolean isReadOnly();
-
-   /**
-    * @param isReadOnly the isReadOnly to set
-    */
-   void setReadOnly(boolean isReadOnly);
-
-   String getPoolName();
-
-   Connection getConnection();
+   boolean getReadOnlyState();
 
    long getLastAccess();
-
-   void setLastAccess(long timestamp);
-
-   boolean isEvicted();
-
-   void evict();
 }

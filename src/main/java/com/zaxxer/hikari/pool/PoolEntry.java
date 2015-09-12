@@ -26,8 +26,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.zaxxer.hikari.pool.Mediators.ConnectionStateMediator;
+import com.zaxxer.hikari.pool.Mediators.PoolEntryMediator;
 import com.zaxxer.hikari.proxy.ConnectionState;
+import com.zaxxer.hikari.proxy.ProxyFactory;
 import com.zaxxer.hikari.util.ClockSource;
 import com.zaxxer.hikari.util.ConcurrentBag.IConcurrentBagEntry;
 import com.zaxxer.hikari.util.FastList;
@@ -37,12 +38,11 @@ import com.zaxxer.hikari.util.FastList;
  *
  * @author Brett Wooldridge
  */
-public final class PoolEntry implements IConcurrentBagEntry, ConnectionState
+public final class PoolEntry implements IConcurrentBagEntry
 {
    private static final Logger LOGGER;
    private static final SimpleDateFormat DATE_FORMAT;
 
-   public final FastList<Statement> openStatements;
    public final long creationTime;
 
    public Connection connection;
@@ -51,14 +51,9 @@ public final class PoolEntry implements IConcurrentBagEntry, ConnectionState
    public volatile long lastOpenTime;
    public volatile boolean evict;
 
-   public boolean isAutoCommit;
-   int networkTimeout;
-   int transactionIsolation;
-   String catalog;
-   boolean isReadOnly;
-   
+   private final FastList<Statement> openStatements;
    private final HikariPool hikariPool;
-   private final ConnectionStateMediator stateMediator;
+   private final PoolEntryMediator stateMediator;
    private final AtomicInteger state;
 
    private volatile ScheduledFuture<?> endOfLife;
@@ -69,7 +64,7 @@ public final class PoolEntry implements IConcurrentBagEntry, ConnectionState
       DATE_FORMAT = new SimpleDateFormat("MMM dd, HH:mm:ss.SSS");
    }
 
-   PoolEntry(final Connection connection, final HikariPool pool, final ConnectionStateMediator stateMediator)
+   PoolEntry(final Connection connection, final HikariPool pool, final PoolEntryMediator stateMediator)
    {
       this.connection = connection;
       this.hikariPool = pool;
@@ -85,7 +80,6 @@ public final class PoolEntry implements IConcurrentBagEntry, ConnectionState
     *
     * @param lastAccess last access time-stamp
     */
-   @Override
    public void returnPoolEntry(final long lastAccess)
    {
       this.lastAccess = lastAccess;
@@ -95,19 +89,22 @@ public final class PoolEntry implements IConcurrentBagEntry, ConnectionState
    /**
     * @param endOfLife
     */
-   public void setFutureEol(ScheduledFuture<?> endOfLife)
+   public void setFutureEol(final ScheduledFuture<?> endOfLife)
    {
       this.endOfLife = endOfLife;
    }
 
+   Connection createProxyConnection(final LeakTask leakTask, final long now)
+   {
+      return ProxyFactory.getProxyConnection(this, connection, openStatements, leakTask, now);
+   }
    // ***********************************************************************
    //                      ConnectionState methods
    // ***********************************************************************
 
-   @Override
-   public void resetConnectionState() throws SQLException
+   public void resetConnectionState(final ConnectionState connectionState, final int dirtyBits) throws SQLException
    {
-      stateMediator.resetConnectionState(connection, this);
+      stateMediator.resetConnectionState(connection, connectionState, dirtyBits);
    }
 
    public String getPoolName()
@@ -115,94 +112,29 @@ public final class PoolEntry implements IConcurrentBagEntry, ConnectionState
       return hikariPool.config.getPoolName();
    }
 
-   @Override
-   public void setNetworkTimeout(int networkTimeout)
-   {
-      this.networkTimeout = networkTimeout;
-   }
-
-   @Override
-   public void setTransactionIsolation(int transactionIsolation)
-   {
-      this.transactionIsolation = transactionIsolation;
-   }
-
-   @Override
-   public void setCatalog(String catalog)
-   {
-      this.catalog = catalog;
-   }
-
-   @Override
-   public boolean isAutoCommit()
-   {
-      return isAutoCommit;
-   }
-
-   @Override
-   public void setAutoCommit(boolean isAutoCommit)
-   {
-      this.isAutoCommit = isAutoCommit;
-   }
-
-   @Override
-   public int getNetworkTimeout()
-   {
-      return networkTimeout;
-   }
-
-   @Override
-   public int getTransactionIsolation()
-   {
-      return transactionIsolation;
-   }
-
-   @Override
-   public String getCatalog()
-   {
-      return catalog;
-   }
-
-   @Override
-   public boolean isReadOnly()
-   {
-      return isReadOnly;
-   }
-
-   @Override
-   public void setReadOnly(boolean isReadOnly)
-   {
-      this.isReadOnly = isReadOnly;
-   }
-
-   @Override
    public Connection getConnection()
    {
       return connection;
    }
 
-   @Override
    public long getLastAccess()
    {
       return lastAccess;
    }
 
-   @Override
-   public void setLastAccess(long timestamp)
-   {
-      this.lastAccess = timestamp;
-   }
-
-   @Override
    public boolean isEvicted()
    {
       return evict;
    }
 
-   @Override
    public void evict()
    {
       this.evict = true;
+   }
+
+   public FastList<Statement> getStatementsList()
+   {
+      return openStatements;
    }
 
    // ***********************************************************************

@@ -51,11 +51,10 @@ import com.zaxxer.hikari.metrics.MetricsTracker;
 import com.zaxxer.hikari.metrics.MetricsTracker.MetricsContext;
 import com.zaxxer.hikari.metrics.MetricsTrackerFactory;
 import com.zaxxer.hikari.metrics.PoolStats;
-import com.zaxxer.hikari.pool.Mediators.ConnectionStateMediator;
+import com.zaxxer.hikari.pool.Mediators.PoolEntryMediator;
 import com.zaxxer.hikari.pool.Mediators.JdbcMediator;
 import com.zaxxer.hikari.pool.Mediators.PoolMediator;
 import com.zaxxer.hikari.proxy.IHikariConnectionProxy;
-import com.zaxxer.hikari.proxy.ProxyFactory;
 import com.zaxxer.hikari.util.ClockSource;
 import com.zaxxer.hikari.util.ConcurrentBag;
 import com.zaxxer.hikari.util.ConcurrentBag.IBagStateListener;
@@ -88,7 +87,7 @@ public class HikariPool implements HikariPoolMXBean, IBagStateListener
    private final JdbcMediator jdbcMediator;
    private final PoolMediator poolMediator;
    private final AtomicInteger totalConnections;
-   private final ConnectionStateMediator entryMediator;
+   private final PoolEntryMediator entryMediator;
    private final ThreadPoolExecutor addConnectionExecutor;
    private final ThreadPoolExecutor closeConnectionExecutor;
 
@@ -193,10 +192,9 @@ public class HikariPool implements HikariPoolMXBean, IBagStateListener
                timeout = hardTimeout - clockSource.elapsedMillis(startTime, now);
             }
             else {
-               poolEntry.setLastAccess(now);
                metricsContext.setConnectionLastOpen(poolEntry, now);
                metricsContext.stop();
-               return ProxyFactory.getProxyConnection(poolEntry, poolEntry.openStatements, leakTask.start(poolEntry));
+               return poolEntry.createProxyConnection(leakTask.start(poolEntry), now);
             }
          }
          while (timeout > 0L);
@@ -290,7 +288,7 @@ public class HikariPool implements HikariPoolMXBean, IBagStateListener
     */
    public final void evictConnection(IHikariConnectionProxy proxyConnection)
    {
-      softEvictConnection((PoolEntry) proxyConnection.getConnectionState(), "(connection evicted by user)", true /* owner */);
+      softEvictConnection(proxyConnection.getPoolEntry(), "(connection evicted by user)", true /* owner */);
    }
 
    /**
